@@ -67,6 +67,7 @@
             box-shadow: 0 4px 20px rgba(58, 90, 120, 0.05);
         }
 
+        /* Tabs Styling */
         .tabs-container {
             display: flex;
             gap: 10px;
@@ -250,7 +251,7 @@
             box-shadow: 0 2px 5px rgba(0,0,0,0.02);
         }
 
-        /* Modal 樣式 */
+        /* --- 新增：客製化 Modal 彈出視窗樣式 --- */
         .modal-overlay {
             display: none;
             position: fixed;
@@ -270,7 +271,10 @@
             max-width: 400px;
             width: 90%;
         }
-        .modal-icon { font-size: 3rem; margin-bottom: 15px; }
+        .modal-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+        }
         .modal-message {
             font-size: 1.3rem;
             font-weight: 700;
@@ -500,4 +504,359 @@
                 <label style="color: #C06055;">💰 手動覆寫最終報價 (可留空)</label>
                 <input type="number" id="manualPrice" placeholder="填寫此欄位將取代系統計算">
             </div>
-            <button class="btn-save" id="save
+            <button class="btn-save" id="saveBtn" onclick="saveData()">💾 儲存報價資料</button>
+        </div>
+
+        <div class="logic-card">
+            <h3 style="margin-top: 0; font-family: 'Playfair Display', serif;">Live Calculation</h3>
+            <div class="step-item">
+                <div class="step-title">步驟 1：尺寸確認</div>
+                <div class="step-content" id="step1">--</div>
+            </div>
+            <div class="step-item">
+                <div class="step-title" id="step2-title">步驟 2：規格判定</div>
+                <div class="step-content" id="step2">--</div>
+            </div>
+            <div class="step-item">
+                <div class="step-title" id="step3-title">步驟 3：用量計算</div>
+                <div class="step-content" id="step3">--</div>
+            </div>
+            <div class="step-item">
+                <div class="step-title">步驟 4：總價構成 (公式拆解)</div>
+                <div class="step-content" id="step4">--</div>
+            </div>
+            <div class="final-price-area">
+                <div class="price-label">最終報價金額</div>
+                <div id="priceDisplay" class="price-value">NT$ 0</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="history-section">
+        <h2 style="text-align:center; font-family: 'Playfair Display', serif; color: var(--accent-color);">History Archive</h2>
+        <div id="historyGrid" class="history-grid"></div>
+    </div>
+</div>
+
+<div id="successModal" class="modal-overlay">
+    <div class="modal-container">
+        <div class="modal-icon">✅</div>
+        <div class="modal-message">已成功記錄到報價資料庫裡</div>
+        <div id="modalQuestion" class="modal-question">是否繼續新增 <strong>[客戶名稱]</strong> 的其他空間？</div>
+        <div class="modal-btn-group">
+            <button class="btn-complete" onclick="finishAndClose()">完成，結案</button>
+            <button class="btn-continue" onclick="continueAdding()">繼續新增</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// 請確保此處填入的是最新部署的 GAS 網址
+const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyvc1QtI_shVEz8qicBqyuohHXOfZB5i_8wm3hiz_8Qjf8JUF5tCg48T_0QgsSiUoi2/exec"; 
+const CM_TO_FT = 30.3;
+    let currentTab = 'fabric';
+
+    document.addEventListener("DOMContentLoaded", () => {
+        const configInputs = [
+            'materialType', 'curtainStyle', 'fabricWidth', 'listPrice', 'manualPrice',
+            'panelTrackPrice', 'panelFabricWidth', 'panelPrice1', 'panelCount1', 'panelPrice2', 'panelCount2', 
+            'panelWandType', 'panelWandQty', 'panelTrackType', 'panelFixing',
+            'blindType', 'blindListPrice'
+        ];
+        configInputs.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('input', updateUI);
+                el.addEventListener('change', updateUI);
+            }
+        });
+        updateUI();
+        loadHistory();
+    });
+
+    function switchTab(tabId) {
+        currentTab = tabId;
+        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        document.querySelector(`[onclick="switchTab('${tabId}')"]`).classList.add('active');
+        
+        document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+        document.getElementById(`tab-${tabId}`).classList.add('active');
+        
+        updateUI();
+    }
+
+    function syncDimension(dimension, sourceUnit) {
+        const cmInput = document.getElementById(`${dimension}Cm`);
+        const ftInput = document.getElementById(`${dimension}Ft`);
+        if (sourceUnit === 'cm') {
+            const cmValue = parseFloat(cmInput.value);
+            if (!isNaN(cmValue)) ftInput.value = (cmValue / CM_TO_FT).toFixed(2);
+            else ftInput.value = '';
+        } else {
+            const ftValue = parseFloat(ftInput.value);
+            if (!isNaN(ftValue)) cmInput.value = Math.round(ftValue * CM_TO_FT);
+            else cmInput.value = '';
+        }
+        updateUI();
+    }
+
+    function getCalcResult() {
+        const wFt = parseFloat(document.getElementById('widthFt').value) || 0;
+        const hFt = parseFloat(document.getElementById('heightFt').value) || 0;
+
+        if (wFt <= 0 || hFt <= 0) return null;
+
+        let res = { baseTotal: 0, formulaHTML: "", specsStr: "", fabricVal: "", steps: [] };
+        res.steps[0] = `寬度：${wFt.toFixed(2)} 尺 | 高度：${hFt.toFixed(2)} 尺`;
+
+        if (currentTab === 'fabric') {
+            const type = document.getElementById('materialType').value;
+            const style = document.getElementById('curtainStyle').value;
+            const fWidth = parseInt(document.getElementById('fabricWidth').value) || 5;
+            const listPrice = parseFloat(document.getElementById('listPrice').value) || 0;
+
+            let multiplier = (type === '紗') ? (style === 'S簾' ? 2.5 : 2.3) : (style === '正三折' ? 2 : (style === '反三折' ? 2.2 : (hFt > 8.5 ? 2.7 : 2.5)));
+            res.steps[1] = `${type} + ${style} ➔ 採用 ${multiplier} 倍摺數`;
+
+            let totalFabric = 0;
+            if (fWidth === 5) {
+                const panels = Math.ceil((wFt * multiplier) / 5);
+                const heightCeil = Math.ceil(hFt + 1);
+                totalFabric = panels * heightCeil;
+                res.steps[2] = `(5尺布) 幅數 ${panels} 幅 × 進位高度 ${heightCeil} 尺 = ${totalFabric} 尺`;
+            } else {
+                totalFabric = Math.ceil(wFt * multiplier);
+                res.steps[2] = `(9尺布) 寬度 ${wFt.toFixed(2)} 尺 × ${multiplier} 倍 = ${totalFabric} 尺`;
+            }
+
+            const trackPrice = (style === 'S簾') ? 250 : 130;
+            const trackFt = Math.max(Math.ceil(wFt), 5); 
+            const trackTotal = trackFt * trackPrice;
+            const fabricTotal = totalFabric * listPrice * 1.45;
+            
+            res.baseTotal = Math.round(fabricTotal + trackTotal);
+            res.formulaHTML = `布料：${totalFabric} 尺 × $${listPrice} × 1.45 = <strong>$${Math.round(fabricTotal)}</strong><br>`;
+            res.formulaHTML += `軌道：${wFt.toFixed(2)} 尺 ➔ 進位計價 ${trackFt} 尺 × $${trackPrice} = <strong>$${Math.round(trackTotal)}</strong><br>`;
+            
+            if (res.baseTotal > 0 && res.baseTotal < 6000) {
+                res.baseTotal += 800;
+                res.formulaHTML += `基本費：總價未滿 6000 加收 = <strong>$800</strong><br>`;
+            }
+
+            res.specsStr = `${hFt.toFixed(2)}x${wFt.toFixed(2)}尺, ${type}, ${style}`;
+            res.fabricVal = `${totalFabric} 尺`;
+            
+        } else if (currentTab === 'panel') {
+            const trackPrice = parseFloat(document.getElementById('panelTrackPrice').value) || 0;
+            const fabricWidth = document.getElementById('panelFabricWidth').value;
+            
+            const p1 = parseFloat(document.getElementById('panelPrice1').value) || 0;
+            const c1 = parseInt(document.getElementById('panelCount1').value) || 0;
+            const p2 = parseFloat(document.getElementById('panelPrice2').value) || 0;
+            const c2 = parseInt(document.getElementById('panelCount2').value) || 0;
+            
+            const totalPanels = c1 + c2;
+            const fabricTotal = (p1 * c1) + (p2 * c2);
+
+            const wandTypePrice = parseInt(document.getElementById('panelWandType').value) || 0;
+            const wandQty = parseInt(document.getElementById('panelWandQty').value) || 0;
+            const wandTotal = wandTypePrice * wandQty;
+
+            const trackType = parseInt(document.getElementById('panelTrackType').value) || 1;
+            const fixingFee = parseInt(document.getElementById('panelFixing').value) || 0;
+
+            res.steps[1] = `片簾：幅寬 ${fabricWidth}cm, 總安裝 ${totalPanels} 片`;
+            res.steps[2] = `主布片(${c1}片) $${p1*c1} + 跳色布片(${c2}片) $${p2*c2}`;
+
+            const materialSubtotal = (trackPrice + fabricTotal) * 1.3;
+            
+            const freight = trackType === 2 ? 800 : 400;
+            let installFee = 3500;
+            if (wFt > 10) {
+                installFee += Math.ceil(wFt - 10) * 300;
+            }
+            const hardwareSubtotal = (freight + wandTotal + installFee + fixingFee) * 1.2;
+
+            res.baseTotal = Math.round(materialSubtotal + hardwareSubtotal);
+            
+            res.formulaHTML = `(手動軌道 $${trackPrice} + 布片總額 $${fabricTotal}) × 1.3 = <strong>$${Math.round(materialSubtotal)}</strong><br>`;
+            res.formulaHTML += `(運$${freight} + 棒$${wandTotal} + 裝$${installFee} + 五金$${fixingFee}) × 1.2 = <strong>$${Math.round(hardwareSubtotal)}</strong><br>`;
+            
+            let fabricSpec = `片簾(${c1}片)`;
+            if (c2 > 0) fabricSpec = `片簾(${c1}+${c2}片混搭)`;
+            res.specsStr = `${hFt.toFixed(2)}x${wFt.toFixed(2)}尺, ${fabricSpec}`;
+            res.fabricVal = `${totalPanels} 片`;
+
+        } else if (currentTab === 'blinds') {
+            const blindSelect = document.getElementById('blindType');
+            const [minCai, blindName] = blindSelect.value.split('_');
+            const listPrice = parseFloat(document.getElementById('blindListPrice').value) || 0;
+
+            const calcCai = Math.ceil(wFt * hFt);
+            const finalCai = Math.max(calcCai, parseInt(minCai));
+
+            res.steps[1] = `窗材種類：${blindName} (基本才數 ${minCai} 才)`;
+            res.steps[2] = `實算才數：${calcCai} 才 ➔ 計價才數：${finalCai} 才`;
+
+            res.baseTotal = Math.round(finalCai * listPrice * 1.3);
+            res.formulaHTML = `窗材：${finalCai} 才 × 牌價 $${listPrice} × 1.3 = <strong>$${res.baseTotal}</strong><br>`;
+
+            res.specsStr = `${hFt.toFixed(2)}x${wFt.toFixed(2)}尺, ${blindName}`;
+            res.fabricVal = `${finalCai} 才`;
+        }
+
+        res.formulaHTML += `<span style="color:var(--accent-color); font-weight:bold; display:inline-block; margin-top:8px;">➔ 系統預估價：$${res.baseTotal.toLocaleString()}</span>`;
+        return res;
+    }
+
+    function updateUI() {
+        const manualPrice = document.getElementById('manualPrice').value;
+        const res = getCalcResult();
+
+        if (!res) {
+            document.getElementById('step1').innerHTML = "<span style='color:#C06055;'>等待輸入有效尺寸...</span>";
+            document.getElementById('step2').innerText = "--";
+            document.getElementById('step3').innerText = "--";
+            document.getElementById('step4').innerText = "--";
+            document.getElementById('priceDisplay').innerHTML = `<span class="price-value">NT$ 0</span>`;
+            return;
+        }
+
+        document.getElementById('step1').innerText = res.steps[0];
+        document.getElementById('step2').innerText = res.steps[1];
+        document.getElementById('step3').innerText = res.steps[2];
+        document.getElementById('step4').innerHTML = res.formulaHTML;
+
+        if (manualPrice && manualPrice.trim() !== "") {
+            document.getElementById('priceDisplay').innerHTML = `<span class="overridden-price">NT$ ${res.baseTotal.toLocaleString()}</span><br><span class="manual-active">NT$ ${parseFloat(manualPrice).toLocaleString()}</span>`;
+        } else {
+            document.getElementById('priceDisplay').innerHTML = `<span class="price-value">NT$ ${res.baseTotal.toLocaleString()}</span>`;
+        }
+    }
+
+    async function saveData() {
+        const customerName = document.getElementById('customerName').value || '未命名客戶';
+        const manualPrice = document.getElementById('manualPrice').value;
+        const res = getCalcResult();
+
+        if (!res) { 
+            alert("請輸入完整尺寸！"); 
+            return; 
+        }
+
+        const formulaText = res.formulaHTML.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+        const payload = {
+            action: 'save',
+            date: new Date().toLocaleDateString('zh-TW'),
+            name: customerName,
+            specs: res.specsStr,
+            fabric: res.fabricVal,
+            estimated: res.baseTotal,
+            price: (manualPrice !== "") ? parseInt(manualPrice) : res.baseTotal,
+            note: formulaText
+        };
+
+        const btn = document.getElementById('saveBtn');
+        btn.innerText = "⏳ 正在同步至雲端...";
+        btn.disabled = true;
+
+        try {
+            await fetch(GOOGLE_SCRIPT_URL, {
+                method: 'POST',
+                mode: 'no-cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            
+            // 替換原本的 alert，改為呼叫自訂 Modal
+            showSuccessModal(customerName);
+            setTimeout(loadHistory, 1000); 
+            
+        } catch (e) {
+            alert("儲存失敗，請確認 GAS 網址。");
+        } finally {
+            btn.innerText = "💾 儲存報價資料";
+            btn.disabled = false;
+        }
+    }
+
+    // --- 新增：Modal 視窗控制與表單重置邏輯 ---
+    function showSuccessModal(name) {
+        document.getElementById('modalQuestion').innerHTML = `是否繼續新增 <strong>[${name}]</strong> 的其他空間？`;
+        document.getElementById('successModal').style.display = 'flex';
+    }
+
+    function closeModal() {
+        document.getElementById('successModal').style.display = 'none';
+    }
+
+    function resetForm(keepCustomerName) {
+        // 如果選擇「完成結案」，則連同客戶名稱一起清空
+        if (!keepCustomerName) {
+            document.getElementById('customerName').value = '';
+        }
+
+        // 清空所有尺寸與手動覆寫金額
+        document.getElementById('widthCm').value = '';
+        document.getElementById('widthFt').value = '';
+        document.getElementById('heightCm').value = '';
+        document.getElementById('heightFt').value = '';
+        document.getElementById('manualPrice').value = '';
+
+        // 片簾專屬欄位回歸預設值，避免下一窗帶有奇怪的舊數字
+        document.getElementById('panelPrice1').value = '500';
+        document.getElementById('panelCount1').value = '4';
+        document.getElementById('panelPrice2').value = '0';
+        document.getElementById('panelCount2').value = '0';
+        document.getElementById('panelWandQty').value = '1';
+
+        // 重新觸發計算邏輯，讓版面歸零
+        updateUI();
+    }
+
+    function continueAdding() {
+        closeModal();
+        resetForm(true); // 傳入 true 代表保留客戶名稱
+        document.getElementById('customerName').focus(); // 讓游標回到輸入框，方便直接修改後面的空間名稱（例如把"主臥"刪掉改成"客廳"）
+    }
+
+    function finishAndClose() {
+        closeModal();
+        resetForm(false); // 傳入 false 代表全數清空
+    }
+
+    async function loadHistory() {
+        if (!GOOGLE_SCRIPT_URL) return;
+        const grid = document.getElementById('historyGrid');
+        grid.innerHTML = "<p style='grid-column: 1/-1; text-align:center;'>載入雲端紀錄中...</p>";
+        try {
+            const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=load`);
+            const data = await response.json();
+            grid.innerHTML = '';
+            if(data.length === 0) {
+                 grid.innerHTML = "<p style='grid-column: 1/-1; text-align:center;'>暫無紀錄。</p>";
+                 return;
+            }
+            data.reverse().forEach(row => {
+                const card = document.createElement('div');
+                card.className = 'history-card';
+                card.innerHTML = `
+                    <h4 style="margin:0 0 10px 0; color:var(--accent-color);">${row[1] || '未具名'}</h4>
+                    <p style="margin:4px 0; font-size:0.85rem; color:#666;"><strong>日期:</strong> ${row[0]}</p>
+                    <p style="margin:4px 0; font-size:0.85rem; color:#666;"><strong>規格:</strong> ${row[2]}</p>
+                    <p style="margin:4px 0; font-size:0.85rem; color:#666;"><strong>試算價:</strong> $${parseInt(row[4]).toLocaleString()}</p>
+                    <div style="font-size:1.4rem; color:var(--accent-color); text-align:right; font-weight:bold; font-family:'Playfair Display'; margin-top:10px;">
+                        最後報價: NT$ ${parseInt(row[5]).toLocaleString()}
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        } catch (e) {
+            grid.innerHTML = "<p style='grid-column: 1/-1; text-align:center; color: #C06055;'>讀取失敗。</p>";
+        }
+    }
+</script>
+
+</body>
+</html>
